@@ -1,4 +1,4 @@
-Group Members, Prisha Malhotra, Kaitlyn Wagoner, Carter Eads  
+Group Members, Prisha Malhotra, Kaitlin Wagoner, Carter Eads  
 
 This swamp cooler project uses evaporation to cool and humidify the air. Water stored in the cooler is used to soak a pad and water from outside the cooler is blown through the pad causing this water 
 to evaporate which humidifies and cools the air. This system senses the surrounding temperature, when the temperature rises above 28 degrees celsius the system turns on,the system turns off after the
