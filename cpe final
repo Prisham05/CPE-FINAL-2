@@ -1,0 +1,231 @@
+#Prisha Malhotra, Carter Eads, Katie Wagoner Final project
+
+#include <DHT.h>
+#include <LiquidCrystal.h>
+#include <RTClib.h>
+#include <Stepper.h>
+
+
+volatile unsigned char* ADMUX  = (unsigned char*)0x7C;
+volatile unsigned char* ADCSRA = (unsigned char*)0x7A;
+volatile unsigned char* ADCSRB = (unsigned char*)0x7B;
+volatile unsigned char* ADCL   = (unsigned char*)0x78;
+volatile unsigned char* ADCH   = (unsigned char*)0x79;
+
+
+volatile unsigned char* UDR0   = (unsigned char*)0xC6;
+volatile unsigned char* UCSR0A = (unsigned char*)0xC0;
+volatile unsigned char* UCSR0B = (unsigned char*)0xC1;
+volatile unsigned char* UCSR0C = (unsigned char*)0xC2;
+volatile unsigned char* UBRR0H = (unsigned char*)0xC5;
+volatile unsigned char* UBRR0L = (unsigned char*)0xC4;
+
+
+volatile unsigned char* PORTH = (unsigned char*)0x102;
+volatile unsigned char* DDRH  = (unsigned char*)0x101;
+volatile unsigned char* PORTL = (unsigned char*)0x10B;
+volatile unsigned char* DDRL  = (unsigned char*)0x10A;
+volatile unsigned char* PINL  = (unsigned char*)0x109;
+
+
+DHT dht(53, DHT11);
+LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+RTC_DS1307 rtc;
+Stepper stepper(200, 23, 25, 27, 29);
+
+
+unsigned int system_state = 0;         // 0=disabled,1=idle,2=error,3=running
+unsigned int system_disabled = 0;
+unsigned int state_reported = 0;
+unsigned int stepper_position_flag = 0;
+
+
+void adc_init() {
+    *ADMUX  = 0b01000000;  // AVCC reference, channel 0 selected
+    *ADCSRB = 0x00;
+    *ADCSRA = 0b10000111;  // enable ADC, prescaler 128
+}
+
+unsigned int adc_read(unsigned char ch) {
+    *ADMUX = (*ADMUX & 0xE0) | (ch & 0x07);
+    *ADCSRA |= 0b01000000;          // start conversion
+    while (*ADCSRA & 0b01000000);   // wait
+    return (*ADCL | (*ADCH << 8)); //oh
+}
+
+
+void usart_init(unsigned int br) {
+    *UBRR0H = br >> 8;
+    *UBRR0L = br;
+    *UCSR0B = 0b00011000;     // RX + TX
+    *UCSR0C = 0b00000110;     // 8N1
+}
+
+void usart_tx_char(unsigned char c) {
+    while (!(*UCSR0A & 0b00100000));
+    *UDR0 = c;
+}
+
+void usart_tx_str(const char* s) {
+    while (*s) usart_tx_char(*s++);
+}
+
+void usart_tx_uint(unsigned int x) {
+    char buf[6];
+    sprintf(buf, "%u", x);
+    usart_tx_str(buf);
+}
+
+
+void tx_time() {
+    DateTime now = rtc.now();
+    usart_tx_uint(now.month());  usart_tx_str("/");
+    usart_tx_uint(now.day());    usart_tx_str("/");
+    usart_tx_uint(now.year());   usart_tx_str(" ");
+
+    usart_tx_uint(now.hour());   usart_tx_str(":");
+    usart_tx_uint(now.minute()); usart_tx_str(":");
+    usart_tx_uint(now.second());
+}
+
+
+void step_once() {
+    if (stepper_position_flag) {
+        stepper.step(-200);
+        stepper_position_flag = 0;
+    } else {
+        stepper.step(200);
+        stepper_position_flag = 1;
+    }
+}
+
+
+void system_power_isr() { system_disabled = !system_disabled; }
+
+void system_reset_isr() {
+    if (system_state == 2 && adc_read(0) >= 20) {
+        system_state = 1;
+        state_reported = 0;
+    }
+}
+
+
+void setup() {
+    usart_init(16000000 / 16 / 9600 - 1);
+    adc_init();
+    dht.begin();
+    rtc.begin();
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
+    lcd.begin(16, 2);
+    stepper.setSpeed(30);
+
+    attachInterrupt(digitalPinToInterrupt(18), system_power_isr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(19), system_reset_isr, CHANGE);
+
+    *DDRH |= 0b01110000;  // LED pins
+    *DDRL |= 0b10000000;  // stepper button output indicator
+    *PORTL |= 0b00010000; // stepper input pull-up
+}
+
+
+void loop() {
+
+    /* show temp + humidity for states 1,2,3 */
+    if (system_state != 0) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Temp: ");
+        lcd.print((int)dht.readTemperature());
+
+        lcd.setCursor(0, 1);
+        lcd.print("Hum: ");
+        lcd.print((int)dht.readHumidity());
+    }
+
+    switch (system_state)
+    {
+        case 0: // DISABLED
+            *PORTH = 0b01100000;
+            *PORTL &= 0b01111111;
+
+            if (!state_reported) {
+                usart_tx_str("System DISABLED ");
+                tx_time();
+                usart_tx_char('\n');
+                state_reported = 1;
+            }
+
+            if (system_disabled) {
+                system_state = 1;
+                state_reported = 0;
+            }
+            break;
+
+
+        case 1: // IDLE
+            *PORTH = 0b00100000; // green
+
+            if (!state_reported) {
+                usart_tx_str("System IDLE ");
+                tx_time();
+                usart_tx_char('\n');
+                state_reported = 1;
+            }
+
+            if (adc_read(0) < 20) {  // low water
+                system_state = 2;
+                state_reported = 0;
+            }
+            if (dht.readTemperature() > 20) {
+                system_state = 3;
+                state_reported = 0;
+            }
+            break;
+
+
+        case 2: // ERROR
+            *PORTH = 0b01000000;
+
+            lcd.clear();
+            lcd.print("ERROR: Low Water");
+
+            if (!state_reported) {
+                usart_tx_str("System ERROR ");
+                tx_time();
+                usart_tx_char('\n');
+                state_reported = 1;
+            }
+            break;
+
+
+        case 3: // RUNNING
+            *PORTH = 0b00010000;  // blue
+            *PORTL |= 0b10000000;
+
+            if (!state_reported) {
+                usart_tx_str("System RUNNING ");
+                tx_time();
+                usart_tx_char('\n');
+                state_reported = 1;
+            }
+
+            if (dht.readTemperature() < 20) {
+                *PORTL &= 0b01111111;
+                system_state = 1;
+                state_reported = 0;
+            }
+            if (adc_read(0) < 20) {
+                *PORTL &= 0b01111111;
+                system_state = 2;
+                state_reported = 0;
+            }
+
+            if (!(*PINL & 0b00010000)) {
+                step_once();
+            }
+            break;
+    }
+
+    delay(1000);
+}
