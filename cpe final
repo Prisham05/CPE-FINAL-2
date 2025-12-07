@@ -1,5 +1,19 @@
 #Prisha Malhotra, Carter Eads, Katie Wagoner Final project
 
+/*  Pin choices 
+
+
+   - Water sensor -> A0 (ADC channel 0)
+   - Vent pot     -> A1 (ADC channel 1) [optional]
+   - DHT11        -> digital 53
+   - LCD pins     -> RS=12, E=11, D4=5, D5=4, D6=3, D7=2
+   - Stepper pins -> 23,25,27,29 (four-coil wiring)
+   - Start button -> 41
+   - Reset button -> 40
+   - Stepper open/close buttons -> digital 34(pinC.3) and 35(pinC.2) (polled via PINC)
+   - Fan control -> PORTC bits (example low-side transistor)
+   - LEDs -> PORTH bits as in reference (yellow/green/red/blue)
+*/
 
 
 #include <DHT.h>
