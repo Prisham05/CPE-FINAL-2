@@ -142,8 +142,8 @@ void pins_init() {
   *myPORTH &= ~((1 << 4)|(1 <<5)|(1 <<3)|(1 <<6)); // all off
 
   // Fan control pins. Set them as outputs.
-  *myDDRC |= (1 << 0) | (1 << 1) | (1 << 2);
-  *myPORTC &= ~((1<<0)|(1<<1)|(1<<2)); // fan off
+ pinMode(46, OUTPUT);
+digitalWrite(46, LOW);   // fan off
 // Start = pin 41, Reset = pin 40
 pinMode(41, INPUT_PULLUP);
 pinMode(40, INPUT_PULLUP);
@@ -165,8 +165,8 @@ void setLED(State s) {
 }
 
 
-void fanOn()  { *myPORTC |= (1<<0); }
-void fanOff() { *myPORTC &= ~(1<<0); }
+void fanOn()  { digitalWrite(46, HIGH); }
+void fanOff() { digitalWrite(46, LOW);  }
 
 void handleVentControl() {
   // Example: PINC bit3 = open button (digital 34), bit2 = close (digital 35)
@@ -371,6 +371,4 @@ if (resetPressed) {
     }
   }
 
-  // short non-blocking idle: allow other background stuff (no delay())
-  // We'll just return to loop as quickly as possible
 }
