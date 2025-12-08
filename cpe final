@@ -1,17 +1,20 @@
 // Prisha Malhotra, Carter Eads, Katie Wagoner Final project
 
-/*  Pin choices  
-
+/*  Pin choices
    - Water sensor -> A0 (ADC channel 0)
    - Vent pot     -> A1 (ADC channel 1) [optional]
    - DHT11        -> digital 53
    - LCD pins     -> RS=12, E=11, D4=5, D5=4, D6=3, D7=2
-   - Stepper pins -> 23, 25, 27, 29 (four-coil wiring)
+   - Stepper pins -> 23,25,27,29 (four-coil wiring)
    - Start button -> 19 (ISR)
    - Reset button -> 18 (polled)
-   - Stepper open/close buttons -> digital 34 (PINC.3) and 35 (PINC.2) (polled via PINC)
-   - Fan control  -> digital 46 (low-side transistor)
-   - LEDs         -> Yellow=PH4, Green=PH5, Red=PH3, Blue=14
+   - Stepper open/close buttons -> digital 34(PINC.3) and 35(PINC.2) (polled via PINC)
+   - Fan control -> digital 46 (low-side transistor)
+   - LEDs (all PORTH, no conflicts with LCD)
+       Yellow -> PH0 = DISABLED
+       Green  -> PH1 = IDLE
+       Red    -> PH2 = ERROR
+       Blue   -> PH6 = RUNNING
 */
 
 #include <DHT.h>
@@ -31,213 +34,248 @@ RTC_DS1307 rtc;
 const int STEPS_PER_REV = 200;
 Stepper stepper(STEPS_PER_REV, 23, 25, 27, 29);
 
-// ADC registers
 volatile unsigned char* myADMUX  = (unsigned char*)0x7C;
 volatile unsigned char* myADCSRB = (unsigned char*)0x7B;
 volatile unsigned char* myADCSRA = (unsigned char*)0x7A;
 volatile unsigned char* myADCL   = (unsigned char*)0x78;
 volatile unsigned char* myADCH   = (unsigned char*)0x79;
 
-// UART registers
-volatile unsigned char* myUCSR0A = (unsigned char*)0x00C0;
-volatile unsigned char* myUCSR0B = (unsigned char*)0x00C1;
-volatile unsigned char* myUCSR0C = (unsigned char*)0x00C2;
-volatile unsigned char* myUBRR0H = (unsigned char*)0x00C5;
-volatile unsigned char* myUBRR0L = (unsigned char*)0x00C4;
-volatile unsigned char* myUDR0   = (unsigned char*)0x00C6;
-
-// LEDs
-volatile unsigned char* myPORTH = (unsigned char*)0x0102;
-volatile unsigned char* myDDRH  = (unsigned char*)0x0101;
-
-// PORTC for fan
-volatile unsigned char* myPORTC = (unsigned char*)0x0028;
-volatile unsigned char* myDDRC  = (unsigned char*)0x0027;
-volatile unsigned char* myPINC  = (unsigned char*)0x0026;
+volatile unsigned char* myPORTH = (unsigned char*)0x0102; // PORTH
+volatile unsigned char* myDDRH  = (unsigned char*)0x0101; // DDRH
+volatile unsigned char* myPINC  = (unsigned char*)0x0026; // PINC
 
 enum State { DISABLED=0, IDLE=1, ERROR=2, RUNNING=3 };
 volatile State systemState = DISABLED;
-
-// ISR flag
 volatile bool startPressedFlag = false;
-bool resetPressedFlag = false;
+volatile bool resetPressedFlag = false;
 
 unsigned long lastLCDUpdateMs = 0;
-const unsigned long LCD_INTERVAL_MS = 60UL * 1000UL;
+const unsigned long LCD_INTERVAL_MS = 60UL * 1000UL; // 1 minute
 
-const uint16_t WATER_THRESHOLD = 250;
-const float TEMP_ON = 28.0;
-const float TEMP_OFF = 26.0;
+const uint16_t WATER_THRESHOLD = 250; // ADC threshold (calibrate)
+const float TEMP_ON = 28.0;          // degrees C to start fan
+const float TEMP_OFF = 26.0;         // degrees C to stop fan
 
 int ventSteps = 0;
 int lastVentBucket = -1;
 
-
 void uart_init(unsigned long baud) {
-    unsigned int ubrr = (F_CPU / 16 / baud) - 1;
-    *myUBRR0H = (unsigned char)(ubrr >> 8);
-    *myUBRR0L = (unsigned char)ubrr;
-    *myUCSR0B = (1 << 3) | (1 << 4);
-    *myUCSR0C = (1 << 1) | (1 << 2);
+  volatile unsigned char* myUCSR0A = (unsigned char*)0x00C0;
+  volatile unsigned char* myUCSR0B = (unsigned char*)0x00C1;
+  volatile unsigned char* myUCSR0C = (unsigned char*)0x00C2;
+  volatile unsigned char* myUBRR0H  = (unsigned char*)0x00C5;
+  volatile unsigned char* myUBRR0L  = (unsigned char*)0x00C4;
+  volatile unsigned char* myUDR0    = (unsigned char*)0x00C6;
+
+  unsigned int ubrr = (F_CPU / 16 / baud) - 1;
+  *myUBRR0H = (unsigned char)(ubrr >> 8);
+  *myUBRR0L = (unsigned char)ubrr;
+  *myUCSR0B = (1 << 3) | (1 << 4); // RXEN0 | TXEN0
+  *myUCSR0C = (1 << 1) | (1 << 2); // UCSZ01 UCSZ00 -> 8-bit
 }
 
 void uart_tx_char(char c) {
-    while (!(*myUCSR0A & (1 << 5)));
-    *myUDR0 = c;
+  volatile unsigned char* myUCSR0A = (unsigned char*)0x00C0;
+  volatile unsigned char* myUDR0    = (unsigned char*)0x00C6;
+  while (!(*myUCSR0A & (1 << 5))); // UDRE0
+  *myUDR0 = c;
 }
 
 void uart_tx_str(const char* s) {
-    while (*s) uart_tx_char(*s++);
+  while (*s) uart_tx_char(*s++);
 }
-
 
 void logEvent(const char* msg) {
-    DateTime now = rtc.now();
-    char s[120];
-    snprintf(s, sizeof(s), "%04u/%02u/%02u %02u:%02u:%02u - %s",
-             now.year(), now.month(), now.day(),
-             now.hour(), now.minute(), now.second(),
-             msg);
-    uart_tx_str(s);
-    uart_tx_char('\n');
+  DateTime now = rtc.now();
+  char s[120];
+  snprintf(s, sizeof(s), "%04u/%02u/%02u %02u:%02u:%02u - %s",
+           now.year(), now.month(), now.day(),
+           now.hour(), now.minute(), now.second(),
+           msg);
+  uart_tx_str(s);
+  uart_tx_char('\n');
 }
 
-
 void adc_init() {
-    *myADMUX = 0;
-    *myADMUX |= (1 << 6);
-    *myADCSRB = 0;
-    *myADCSRA = 0;
-    *myADCSRA |= (1 << 7);
-    *myADCSRA |= (1 << 2) | (1 << 1) | (1 << 0);
-    volatile uint16_t x=0; (void)x;
+  *myADMUX = 0;
+  *myADMUX |= (1 << 6); // AVcc
+  *myADCSRB = 0;
+  *myADCSRA = 0;
+  *myADCSRA |= (1 << 7); // ADEN
+  *myADCSRA |= (1 << 2) | (1 << 1) | (1 << 0); // prescaler 128
+  volatile uint16_t x = 0; (void)x; // discard first reading
 }
 
 uint16_t adc_read(uint8_t channel) {
-    *myADMUX = (*myADMUX & 0xF0) | (channel & 0x0F);
-    *myADCSRA |= (1 << 6);
-    while (*myADCSRA & (1 << 6));
-    uint16_t low = *myADCL;
-    uint16_t high = *myADCH;
-    return (high << 8) | low;
+  *myADMUX = (*myADMUX & 0xF0) | (channel & 0x0F);
+  *myADCSRA |= (1 << 6); // ADSC
+  while (*myADCSRA & (1 << 6));
+  uint16_t low = *myADCL;
+  uint16_t high = *myADCH;
+  return (high << 8) | low;
 }
 
+void pins_init() {
+  // LEDs on PORTH
+  *myDDRH |= (1<<0)|(1<<1)|(1<<2)|(1<<6); // Yellow, Green, Red, Blue
+  *myPORTH &= ~((1<<0)|(1<<1)|(1<<2)|(1<<6)); // all off
+
+  // Fan control
+  pinMode(46, OUTPUT);
+  digitalWrite(46, LOW);   // fan off
+
+  // Start/Reset buttons
+  pinMode(19, INPUT_PULLUP);
+  pinMode(18, INPUT_PULLUP);
+}
 
 void setLED(State s) {
-    *myPORTH &= ~((1<<4)|(1<<5)|(1<<3));
-    digitalWrite(14, LOW); // Blue LED off
-    switch(s) {
-        case DISABLED: *myPORTH |= (1<<4); break;
-        case IDLE:     *myPORTH |= (1<<5); break;
-        case ERROR:    *myPORTH |= (1<<3); break;
-        case RUNNING:  digitalWrite(14,HIGH); break; // Blue LED
-    }
+  *myPORTH &= ~((1<<0)|(1<<1)|(1<<2)|(1<<6)); // clear all
+  switch (s) {
+    case DISABLED: *myPORTH |= (1<<0); break; // Yellow
+    case IDLE:     *myPORTH |= (1<<1); break; // Green
+    case ERROR:    *myPORTH |= (1<<2); break; // Red
+    case RUNNING:  *myPORTH |= (1<<6); break; // Blue
+  }
 }
 
-//fan
-void fanOn()  { *myPORTC |= (1 << 0); }
-void fanOff() { *myPORTC &= ~(1 << 0); }
+void fanOn()  { digitalWrite(46, HIGH); }
+void fanOff() { digitalWrite(46, LOW);  }
 
-//ent
 void handleVentControl() {
-    bool openBtn  = !(*myPINC & (1<<3));
-    bool closeBtn = !(*myPINC & (1<<2));
-    if(openBtn) { stepper.setSpeed(30); stepper.step(10); ventSteps+=10; logEvent("Vent open"); }
-    else if(closeBtn) { stepper.setSpeed(30); stepper.step(-10); ventSteps-=10; logEvent("Vent close"); }
-    else {
-        uint16_t pot = adc_read(1);
-        int bucket = pot / 128;
-        if(bucket != lastVentBucket) {
-            int targetSteps = (bucket - 3) * 20;
-            int delta = targetSteps - ventSteps;
-            if(delta!=0){ stepper.setSpeed(30); stepper.step(delta); ventSteps=targetSteps; char bmsg[40]; snprintf(bmsg,sizeof(bmsg),"Vent pot bucket %d",bucket); logEvent(bmsg);}
-            lastVentBucket = bucket;
-        }
+  bool openBtn  = !(*myPINC & (1<<3));
+  bool closeBtn = !(*myPINC & (1<<2));
+  if (openBtn) {
+    stepper.setSpeed(30); stepper.step(10); ventSteps += 10;
+    logEvent("Vent moved: open button");
+  } else if (closeBtn) {
+    stepper.setSpeed(30); stepper.step(-10); ventSteps -= 10;
+    logEvent("Vent moved: close button");
+  } else {
+    uint16_t pot = adc_read(1);
+    int bucket = pot / 128;
+    if (bucket != lastVentBucket) {
+      int targetSteps = (bucket - 3) * 20;
+      int delta = targetSteps - ventSteps;
+      if (delta != 0) {
+        stepper.setSpeed(30);
+        stepper.step(delta);
+        ventSteps = targetSteps;
+        char bmsg[40];
+        snprintf(bmsg,sizeof(bmsg),"Vent pot moved to bucket %d",bucket);
+        logEvent(bmsg);
+      }
+      lastVentBucket = bucket;
     }
+  }
 }
 
-//ISR
-void startISR() {
-    startPressedFlag = true;
-}
+void startISR() { startPressedFlag = true; }
 
 void setup() {
-    lcd.begin(16,2);
-    dht.begin();
-    rtc.begin();
-    if(!rtc.isrunning()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  lcd.begin(16,2);
+  dht.begin();
+  rtc.begin();
+  if (!rtc.isrunning()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
-    adc_init();
-    uart_init(9600);
-    stepper.setSpeed(30);
+  adc_init();
+  pins_init();
+  uart_init(9600);
 
-    // LEDs
-    *myDDRH |= (1<<4)|(1<<5)|(1<<3);
-    pinMode(14, OUTPUT); digitalWrite(14,LOW);
+  stepper.setSpeed(30);
 
-    // Fan
-    *myDDRC |= (1<<0); *myPORTC &= ~(1<<0);
+  systemState = DISABLED;
+  setLED(systemState);
+  lcd.clear(); lcd.print("Swamp Cooler");
+  lcd.setCursor(0,1); lcd.print("State: DISABLED");
+  logEvent("System boot - DISABLED");
 
-    // Start (ISR)
-    pinMode(19, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(19), startISR, FALLING);
-
-    // Reset button (polled)
-    pinMode(18, INPUT_PULLUP);
-
-    systemState = DISABLED;
-    setLED(systemState);
-    lcd.clear();
-    lcd.print("Swamp Cooler");
-    lcd.setCursor(0,1); lcd.print("State: DISABLED");
-    logEvent("System boot - DISABLED");
+  attachInterrupt(digitalPinToInterrupt(19), startISR, FALLING);
 }
 
-//main loop
 void loop() {
-    unsigned long now = millis();
+  unsigned long now = millis();
 
-    // Poll reset
-    resetPressedFlag = !digitalRead(18);
+  if (resetPressedFlag) {
+    resetPressedFlag = false;
+    if (systemState == ERROR) {
+      uint16_t water = adc_read(0);
+      if (water >= WATER_THRESHOLD) {
+        systemState = IDLE;
+        setLED(systemState);
+        logEvent("Reset pressed -> IDLE (water OK)");
+      } else {
+        logEvent("Reset pressed but water still low");
+      }
+    }
+  }
 
-    // Handle start ISR flag
-    if(startPressedFlag) {
-        startPressedFlag = false;
-        if(systemState==DISABLED){ systemState=IDLE; setLED(systemState); lcd.clear(); lcd.print("State: IDLE"); logEvent("Start->IDLE"); }
-        else if(systemState==IDLE) logEvent("Start pressed while IDLE");
-        else if(systemState==RUNNING){ fanOff(); systemState=IDLE; setLED(systemState); logEvent("Start->Motor OFF->IDLE"); }
-        else if(systemState==ERROR) logEvent("Start pressed during ERROR ignored");
+  if (systemState != DISABLED) {
+    uint16_t water = adc_read(0);
+    if (water < WATER_THRESHOLD && systemState != ERROR) {
+      fanOff();
+      systemState = ERROR;
+      setLED(systemState);
+      lcd.clear(); lcd.print("ERROR: Low Water");
+      logEvent("Transition -> ERROR (low water)");
     }
 
-    // Handle reset
-    if(resetPressedFlag && systemState==ERROR){
-        uint16_t water = adc_read(0);
-        if(water>=WATER_THRESHOLD){ systemState=IDLE; setLED(systemState); logEvent("Reset->IDLE"); }
-        else logEvent("Reset pressed but water low");
+    float temp = dht.readTemperature();
+    float hum  = dht.readHumidity();
+
+    if (now - lastLCDUpdateMs >= LCD_INTERVAL_MS || lastLCDUpdateMs == 0) {
+      lastLCDUpdateMs = now;
+      lcd.clear();
+      lcd.setCursor(0,0);
+      if (!isnan(temp)) { lcd.print("T:"); lcd.print(temp,1); lcd.print("C "); } else lcd.print("T: ERR ");
+      if (!isnan(hum))  { lcd.print("H:"); lcd.print(hum,0); lcd.print("%"); } else lcd.print("H:ERR");
+      lcd.setCursor(0,1);
+      if (systemState==IDLE) lcd.print("State: IDLE");
+      else if (systemState==RUNNING) lcd.print("State: RUNNING");
+      else if (systemState==ERROR) lcd.print("State: ERROR");
     }
 
-    if(systemState!=DISABLED){
-        uint16_t water = adc_read(0);
-        if(water<WATER_THRESHOLD && systemState!=ERROR){ fanOff(); systemState=ERROR; setLED(systemState); lcd.clear(); lcd.print("ERROR: Low Water"); logEvent("ERROR low water"); }
-
-        float temp=dht.readTemperature(); float hum=dht.readHumidity();
-        if(now-lastLCDUpdateMs>=LCD_INTERVAL_MS || lastLCDUpdateMs==0){
-            lastLCDUpdateMs=now;
-            lcd.clear(); lcd.setCursor(0,0);
-            lcd.print(!isnan(temp)?"T:"+String(temp,1)+"C ":"T:ERR ");
-            lcd.print(!isnan(hum)?"H:"+String((int)hum)+"%":"H:ERR");
-            lcd.setCursor(0,1);
-            lcd.print(systemState==IDLE?"State: IDLE":systemState==RUNNING?"State: RUNNING":"State: ERROR");
-        }
-
-        // State transitions
-        if(systemState==IDLE && !isnan(temp) && temp>=TEMP_ON && water>=WATER_THRESHOLD){
-            systemState=RUNNING; setLED(systemState); fanOn(); logEvent("IDLE->RUNNING");
-        }
-        else if(systemState==RUNNING && !isnan(temp) && temp<TEMP_OFF){ fanOff(); systemState=IDLE; setLED(systemState); logEvent("RUNNING->IDLE"); }
-        else if(systemState==ERROR) fanOff();
-
-        handleVentControl();
+    if (systemState == IDLE) {
+      if (!isnan(temp) && temp >= TEMP_ON && water >= WATER_THRESHOLD) {
+        systemState = RUNNING;
+        setLED(systemState);
+        fanOn();
+        logEvent("Transition -> RUNNING (motor ON)");
+      }
+    } else if (systemState == RUNNING) {
+      if (!isnan(temp) && temp < TEMP_OFF) {
+        fanOff();
+        systemState = IDLE;
+        setLED(systemState);
+        logEvent("Transition -> IDLE (temp low, motor OFF)");
+      }
+    } else if (systemState == ERROR) {
+      fanOff();
     }
+
+    handleVentControl();
+  }
+
+  // Poll reset button
+  bool resetPressed = !digitalRead(18);
+  if (resetPressed) {
+    delay(20); if (!digitalRead(18)) resetPressedFlag = true;
+  }
+
+  // Handle start ISR flag
+  if (startPressedFlag) {
+    startPressedFlag = false;
+    if (systemState == DISABLED) {
+      systemState = IDLE; setLED(systemState);
+      logEvent("Start pressed -> IDLE");
+      lcd.clear(); lcd.print("State: IDLE");
+    } else if (systemState == IDLE) {
+      logEvent("Start pressed while IDLE");
+    } else if (systemState == RUNNING) {
+      fanOff(); systemState = IDLE; setLED(systemState);
+      logEvent("Start pressed -> Motor OFF -> IDLE");
+    } else if (systemState == ERROR) {
+      logEvent("Start pressed during ERROR ignored");
+    }
+  }
 }
-
