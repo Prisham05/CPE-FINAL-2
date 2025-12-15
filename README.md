@@ -7,4 +7,4 @@ temperature drops below 28 degrees celsius. A water level sensor monitors the wa
 This system has four states, disabled, idle, running, and error. In the disabled state all components are off and the yellow LED is turned on. The system is completely inactive and will switch to the
 idle state after the start button is pressed. In the idle state the 
 
-[Circuit Disgram](https://app.cirkitdesigner.com/project/16be2c5e-03c9-4ea3-9797-0ab7ed4d2b68)
+[Circuit Diagram](https://app.cirkitdesigner.com/project/16be2c5e-03c9-4ea3-9797-0ab7ed4d2b68)
